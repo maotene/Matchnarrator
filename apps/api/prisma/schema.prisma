@@ -1,0 +1,259 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// USER & AUTH
+// ============================================
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String
+  role      UserRole
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  matchSessions MatchSession[]
+}
+
+enum UserRole {
+  SUPERADMIN
+  NARRADOR
+}
+
+// ============================================
+// CATALOGOS
+// ============================================
+
+model Competition {
+  id        String   @id @default(cuid())
+  name      String
+  country   String?
+  logo      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  seasons Season[]
+}
+
+model Season {
+  id            String    @id @default(cuid())
+  name          String
+  competitionId String
+  startDate     DateTime?
+  endDate       DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  competition    Competition    @relation(fields: [competitionId], references: [id], onDelete: Cascade)
+  teams          TeamSeason[]
+  fixtureMatches FixtureMatch[]
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  shortName String?
+  logo      String?
+  city      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  seasons     TeamSeason[]
+  homeMatches MatchSession[] @relation("HomeTeam")
+  awayMatches MatchSession[] @relation("AwayTeam")
+}
+
+model TeamSeason {
+  id       String @id @default(cuid())
+  teamId   String
+  seasonId String
+
+  team    Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  season  Season         @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  players PlayerSeason[]
+
+  @@unique([teamId, seasonId])
+}
+
+model Player {
+  id          String          @id @default(cuid())
+  firstName   String
+  lastName    String
+  photo       String?
+  birthDate   DateTime?
+  nationality String?
+  position    PlayerPosition?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  seasons PlayerSeason[]
+}
+
+enum PlayerPosition {
+  GK // Goalkeeper
+  DF // Defender
+  MF // Midfielder
+  FW // Forward
+}
+
+model PlayerSeason {
+  id           String @id @default(cuid())
+  playerId     String
+  teamSeasonId String
+  jerseyNumber Int?
+
+  player     Player     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  teamSeason TeamSeason @relation(fields: [teamSeasonId], references: [id], onDelete: Cascade)
+
+  @@unique([playerId, teamSeasonId])
+}
+
+// ============================================
+// FIXTURE (FASE 2 - opcional)
+// ============================================
+
+model FixtureMatch {
+  id         String   @id @default(cuid())
+  seasonId   String
+  homeTeamId String
+  awayTeamId String
+  matchDate  DateTime
+  venue      String?
+  round      Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  season        Season         @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  matchSessions MatchSession[]
+}
+
+// ============================================
+// MATCH SESSION
+// ============================================
+
+model MatchSession {
+  id             String      @id @default(cuid())
+  narratorId     String
+  homeTeamId     String
+  awayTeamId     String
+  fixtureMatchId String?
+  matchDate      DateTime
+  venue          String?
+  status         MatchStatus @default(SETUP)
+
+  // Timer state
+  currentPeriod       MatchPeriod @default(FIRST_HALF)
+  elapsedSeconds      Int         @default(0)
+  isTimerRunning      Boolean     @default(false)
+  firstHalfAddedTime  Int?
+  secondHalfAddedTime Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  narrator     User           @relation(fields: [narratorId], references: [id])
+  homeTeam     Team           @relation("HomeTeam", fields: [homeTeamId], references: [id])
+  awayTeam     Team           @relation("AwayTeam", fields: [awayTeamId], references: [id])
+  fixtureMatch FixtureMatch?  @relation(fields: [fixtureMatchId], references: [id])
+  roster       MatchRosterPlayer[]
+  events       MatchEvent[]
+}
+
+enum MatchStatus {
+  SETUP    // Configurando alineaciones
+  LIVE     // En vivo
+  HALFTIME // Medio tiempo
+  FINISHED // Finalizado
+}
+
+enum MatchPeriod {
+  FIRST_HALF
+  SECOND_HALF
+  EXTRA_TIME_FIRST
+  EXTRA_TIME_SECOND
+  PENALTIES
+}
+
+// ============================================
+// ROSTER PLAYER
+// ============================================
+
+model MatchRosterPlayer {
+  id           String          @id @default(cuid())
+  matchId      String
+  playerId     String
+  teamId       String
+  jerseyNumber Int
+  isHomeTeam   Boolean
+  isStarter    Boolean         @default(true)
+  position     PlayerPosition?
+
+  // Layout position (x, y en % de 0-100)
+  layoutX Float?
+  layoutY Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  match  MatchSession @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  events MatchEvent[]
+
+  @@unique([matchId, playerId])
+}
+
+// ============================================
+// MATCH EVENT
+// ============================================
+
+model MatchEvent {
+  id             String      @id @default(cuid())
+  matchId        String
+  rosterPlayerId String?
+  teamSide       TeamSide
+  eventType      EventType
+  period         MatchPeriod
+  minute         Int
+  second         Int
+  payload        Json?
+  isDeleted      Boolean     @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  match        MatchSession       @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  rosterPlayer MatchRosterPlayer? @relation(fields: [rosterPlayerId], references: [id])
+
+  @@index([matchId, isDeleted])
+}
+
+enum TeamSide {
+  HOME
+  AWAY
+}
+
+enum EventType {
+  GOAL
+  FOUL
+  SAVE
+  OFFSIDE
+  PASS
+  SUBSTITUTION
+  YELLOW_CARD
+  RED_CARD
+  CORNER
+  FREEKICK
+  PENALTY
+  SHOT
+  OTHER
+}
