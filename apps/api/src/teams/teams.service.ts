@@ -8,15 +8,51 @@ import { AssignToSeasonDto } from './dto/assign-to-season.dto';
 export class TeamsService {
   constructor(private prisma: PrismaService) {}
 
-  async create(createTeamDto: CreateTeamDto) {
-    return this.prisma.team.create({
+  private async writeAudit(
+    actorUserId: string | undefined,
+    action: string,
+    entityType: string,
+    entityId?: string,
+    payload?: unknown,
+  ) {
+    const delegate = (this.prisma as any).auditLog;
+    if (!delegate) return;
+    await delegate.create({
+      data: {
+        actorUserId: actorUserId ?? null,
+        action,
+        entityType,
+        entityId: entityId ?? null,
+        payload: payload ?? null,
+      },
+    });
+  }
+
+  async create(createTeamDto: CreateTeamDto, actorUserId?: string) {
+    const team = await this.prisma.team.create({
       data: createTeamDto,
     });
+    await this.writeAudit(actorUserId, 'TEAM_CREATE', 'Team', team.id, createTeamDto);
+    return team;
   }
 
   async findAll() {
     return this.prisma.team.findMany({
       include: {
+        seasons: {
+          include: {
+            season: {
+              include: {
+                competition: true,
+              },
+            },
+          },
+          orderBy: {
+            season: {
+              name: 'desc',
+            },
+          },
+        },
         _count: {
           select: {
             seasons: true,
@@ -71,26 +107,79 @@ export class TeamsService {
     return team;
   }
 
-  async update(id: string, updateTeamDto: UpdateTeamDto) {
+  async update(id: string, updateTeamDto: UpdateTeamDto, actorUserId?: string) {
     await this.findOne(id);
 
-    return this.prisma.team.update({
+    const team = await this.prisma.team.update({
       where: { id },
       data: updateTeamDto,
     });
+    await this.writeAudit(actorUserId, 'TEAM_UPDATE', 'Team', id, updateTeamDto);
+    return team;
   }
 
-  async remove(id: string) {
+  async remove(id: string, actorUserId?: string) {
     await this.findOne(id);
+
+    const [
+      seasonsCount,
+      standingsCount,
+      homeSessionsCount,
+      awaySessionsCount,
+      fixtureHomeCount,
+      fixtureAwayCount,
+      rosterRefsCount,
+    ] = await Promise.all([
+      this.prisma.teamSeason.count({ where: { teamId: id } }),
+      this.prisma.seasonStanding.count({ where: { teamId: id } }),
+      this.prisma.matchSession.count({ where: { homeTeamId: id } }),
+      this.prisma.matchSession.count({ where: { awayTeamId: id } }),
+      this.prisma.fixtureMatch.count({ where: { homeTeamId: id } }),
+      this.prisma.fixtureMatch.count({ where: { awayTeamId: id } }),
+      this.prisma.matchRosterPlayer.count({ where: { teamId: id } }),
+    ]);
+
+    const totalReferences =
+      seasonsCount +
+      standingsCount +
+      homeSessionsCount +
+      awaySessionsCount +
+      fixtureHomeCount +
+      fixtureAwayCount +
+      rosterRefsCount;
+
+    if (totalReferences > 0) {
+      await this.writeAudit(actorUserId, 'TEAM_DELETE_BLOCKED', 'Team', id, {
+        seasonsCount,
+        standingsCount,
+        homeSessionsCount,
+        awaySessionsCount,
+        fixtureHomeCount,
+        fixtureAwayCount,
+        rosterRefsCount,
+      });
+      throw new ConflictException(
+        `No se puede eliminar el equipo porque tiene datos relacionados (temporadas:${seasonsCount}, tabla:${standingsCount}, fixtures:${fixtureHomeCount + fixtureAwayCount}, sesiones:${homeSessionsCount + awaySessionsCount}, roster:${rosterRefsCount}). Usa editar o deshabilitar en lugar de borrar.`,
+      );
+    }
 
     await this.prisma.team.delete({
       where: { id },
+    });
+    await this.writeAudit(actorUserId, 'TEAM_DELETE', 'Team', id, {
+      seasonsCount,
+      standingsCount,
+      homeSessionsCount,
+      awaySessionsCount,
+      fixtureHomeCount,
+      fixtureAwayCount,
+      rosterRefsCount,
     });
 
     return { message: 'Team deleted successfully' };
   }
 
-  async assignToSeason(id: string, assignToSeasonDto: AssignToSeasonDto) {
+  async assignToSeason(id: string, assignToSeasonDto: AssignToSeasonDto, actorUserId?: string) {
     await this.findOne(id);
 
     // Check if season exists
@@ -118,7 +207,7 @@ export class TeamsService {
       throw new ConflictException('Team is already assigned to this season');
     }
 
-    return this.prisma.teamSeason.create({
+    const teamSeason = await this.prisma.teamSeason.create({
       data: {
         teamId: id,
         seasonId: assignToSeasonDto.seasonId,
@@ -132,5 +221,10 @@ export class TeamsService {
         },
       },
     });
+    await this.writeAudit(actorUserId, 'TEAM_ASSIGN_SEASON', 'TeamSeason', teamSeason.id, {
+      teamId: id,
+      seasonId: assignToSeasonDto.seasonId,
+    });
+    return teamSeason;
   }
 }

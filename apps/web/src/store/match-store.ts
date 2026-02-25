@@ -23,6 +23,7 @@ interface MatchState {
   addEvent: (event: any) => void;
   removeEvent: (eventId: string) => void;
   updateRosterLayout: (rosterId: string, x: number, y: number) => void;
+  applySubstitution: (outRosterId: string, inRosterId: string) => void;
 }
 
 export const useMatchStore = create<MatchState>((set) => ({
@@ -74,4 +75,31 @@ export const useMatchStore = create<MatchState>((set) => ({
           }
         : null,
     })),
+
+  applySubstitution: (outRosterId, inRosterId) =>
+    set((state) => {
+      if (!state.match) return { match: null };
+      const outPlayer = state.match.roster.find((r: any) => r.id === outRosterId);
+      const nextRoster = state.match.roster.map((r: any) => {
+        if (r.id === outRosterId) {
+          return { ...r, isStarter: false };
+        }
+        if (r.id === inRosterId) {
+          return {
+            ...r,
+            isStarter: true,
+            layoutX: outPlayer?.layoutX ?? r.layoutX,
+            layoutY: outPlayer?.layoutY ?? r.layoutY,
+          };
+        }
+        return r;
+      });
+      return {
+        match: {
+          ...state.match,
+          roster: nextRoster,
+        },
+        selectedPlayerId: inRosterId,
+      };
+    }),
 }));

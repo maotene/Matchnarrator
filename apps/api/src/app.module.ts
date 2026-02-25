@@ -13,6 +13,8 @@ import { MatchesModule } from './matches/matches.module';
 import { RosterModule } from './roster/roster.module';
 import { EventsModule } from './events/events.module';
 import { ExportModule } from './export/export.module';
+import { ImportModule } from './import/import.module';
+import { AuditModule } from './audit/audit.module';
 
 @Module({
   imports: [
@@ -30,6 +32,8 @@ import { ExportModule } from './export/export.module';
     RosterModule,
     EventsModule,
     ExportModule,
+    ImportModule,
+    AuditModule,
   ],
   controllers: [AppController],
   providers: [AppService],

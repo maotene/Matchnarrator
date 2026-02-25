@@ -1,66 +1,138 @@
-'use client';
+"use client";
 
-import React, { useEffect } from 'react';
-import { useParams, useRouter } from 'next/navigation';
-import { useMatchStore } from '@/store/match-store';
-import { useToast } from '@/hooks/use-toast';
-import { FieldCanvas } from '@/components/field/field-canvas';
-import { TimerComponent } from '@/components/timer/timer-component';
-import { EventTimeline } from '@/components/timeline/event-timeline';
-import { useMatchHotkeys } from '@/hooks/use-hotkeys';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Download, Keyboard } from 'lucide-react';
-import api from '@/lib/api';
+import React, { useEffect, useCallback, useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useMatchStore } from "@/store/match-store";
+import { useToast } from "@/hooks/use-toast";
+import { FieldCanvas } from "@/components/field/field-canvas";
+import { TimerComponent } from "@/components/timer/timer-component";
+import { EventTimeline } from "@/components/timeline/event-timeline";
+import { RosterSetup } from "@/components/roster/roster-setup";
+import { PlayerPanel } from "@/components/roster/player-panel";
+import { EventDialog } from "@/components/events/event-dialog";
+import { EventButtons } from "@/components/events/event-buttons";
+import { Modal } from "@/components/ui/modal";
+import { useMatchHotkeys, HOTKEY_MAPPINGS } from "@/hooks/use-hotkeys";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Download, Keyboard } from "lucide-react";
+import api from "@/lib/api";
 
 export default function MatchCenterPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { toast } = useToast();
   const matchId = params.id as string;
-  const { match, setMatch, selectedPlayerId } = useMatchStore();
-  const [showHotkeys, setShowHotkeys] = React.useState(false);
+  const { match, setMatch, selectedPlayerId, addEvent } = useMatchStore();
 
-  // Enable hotkeys
-  const { HOTKEY_MAPPINGS } = useMatchHotkeys({
+  const [showHotkeys, setShowHotkeys] = useState(false);
+  const [pendingEventType, setPendingEventType] = useState<string | null>(null);
+  const [showLineupModal, setShowLineupModal] = useState(false);
+  const [lineupSide, setLineupSide] = useState<"home" | "away">("home");
+
+  const queryReadOnly = searchParams.get("readonly");
+  const isReadOnlyQuery = queryReadOnly === "1" || queryReadOnly === "true";
+  const isReadOnly = match?.status === "FINISHED" || isReadOnlyQuery;
+  const isLive = (match?.status === "LIVE" || match?.status === "HALFTIME") && !isReadOnly;
+
+  const triggerEvent = useCallback(
+    async (eventType: string) => {
+      if (!match) return;
+      if (isReadOnly) {
+        toast({
+          title: "Solo lectura",
+          description: "El partido está finalizado y no admite cambios.",
+        });
+        return;
+      }
+      if (!isLive) {
+        toast({
+          title: "Partido no iniciado",
+          description: "Inicia el cronómetro para registrar eventos",
+          variant: "destructive",
+        });
+        return;
+      }
+      if (eventType === "SUBSTITUTION") {
+        setPendingEventType(eventType);
+        return;
+      }
+
+      const selectedRoster = match.roster.find(
+        (r: any) => r.id === selectedPlayerId,
+      );
+      if (!selectedRoster) {
+        setPendingEventType(eventType);
+        return;
+      }
+
+      try {
+        const minute = Math.floor(match.elapsedSeconds / 60);
+        const second = match.elapsedSeconds % 60;
+        const response = await api.post(`/matches/${matchId}/events`, {
+          rosterPlayerId: selectedRoster.id,
+          teamSide: selectedRoster.isHomeTeam ? "HOME" : "AWAY",
+          eventType,
+          period: match.currentPeriod,
+          minute,
+          second,
+        });
+        addEvent(response.data);
+        toast({ title: "Evento registrado" });
+      } catch (error: any) {
+        toast({
+          title: "Error",
+          description:
+            error.response?.data?.message || "No se pudo registrar el evento",
+          variant: "destructive",
+        });
+      }
+    },
+    [addEvent, isLive, isReadOnly, match, matchId, selectedPlayerId, toast],
+  );
+
+  useMatchHotkeys({
     matchId,
-    isEnabled: match?.status === 'LIVE' || match?.status === 'HALFTIME',
+    isEnabled: isLive ?? false,
+    onEventTriggered: triggerEvent,
   });
+
+  const fetchMatch = useCallback(async () => {
+    try {
+      const response = await api.get(`/matches/${matchId}`);
+      setMatch(response.data);
+    } catch {
+      toast({
+        title: "Error",
+        description: "No se pudo cargar el partido",
+        variant: "destructive",
+      });
+      router.push("/dashboard");
+    }
+  }, [matchId]);
 
   useEffect(() => {
     fetchMatch();
   }, [matchId]);
 
-  const fetchMatch = async () => {
-    try {
-      const response = await api.get(`/matches/${matchId}`);
-      setMatch(response.data);
-    } catch (error: any) {
-      toast({
-        title: 'Error',
-        description: 'No se pudo cargar el partido',
-        variant: 'destructive',
-      });
-      router.push('/dashboard');
-    }
-  };
-
   const handleExport = async () => {
     try {
       const response = await api.get(`/matches/${matchId}/export`);
-      const dataStr = JSON.stringify(response.data, null, 2);
-      const dataBlob = new Blob([dataStr], { type: 'application/json' });
-      const url = URL.createObjectURL(dataBlob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `match-${matchId}-${new Date().toISOString()}.json`;
-      link.click();
-      toast({ title: 'Partido exportado exitosamente' });
-    } catch (error: any) {
+      const blob = new Blob([JSON.stringify(response.data, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `match-${matchId}-${new Date().toISOString()}.json`;
+      a.click();
+      toast({ title: "Partido exportado" });
+    } catch {
       toast({
-        title: 'Error',
-        description: 'No se pudo exportar el partido',
-        variant: 'destructive',
+        title: "Error",
+        description: "No se pudo exportar",
+        variant: "destructive",
       });
     }
   };
@@ -68,151 +140,200 @@ export default function MatchCenterPage() {
   if (!match) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <p>Cargando partido...</p>
+        <p className="text-muted-foreground">Cargando partido...</p>
       </div>
     );
   }
 
   const homeGoals = match.events.filter(
-    (e: any) => e.teamSide === 'HOME' && e.eventType === 'GOAL'
+    (e: any) => e.teamSide === "HOME" && e.eventType === "GOAL",
   ).length;
   const awayGoals = match.events.filter(
-    (e: any) => e.teamSide === 'AWAY' && e.eventType === 'GOAL'
+    (e: any) => e.teamSide === "AWAY" && e.eventType === "GOAL",
   ).length;
+  const isSetup = match.status === "SETUP";
+  const homeStarters = match.roster.filter(
+    (r: any) => r.isHomeTeam && r.isStarter,
+  ).length;
+  const awayStarters = match.roster.filter(
+    (r: any) => !r.isHomeTeam && r.isStarter,
+  ).length;
+  const shouldShowSetup =
+    isSetup && !(homeStarters === 11 && awayStarters === 11);
+  const selectedRosterPlayer = match.roster.find(
+    (r: any) => r.id === selectedPlayerId,
+  );
+  const selectedName = selectedRosterPlayer
+    ? `${selectedRosterPlayer.jerseyNumber} ${selectedRosterPlayer.customName || selectedRosterPlayer.player?.lastName || ""}`
+    : null;
+  const homeTeamLabel = match.homeTeam.shortName || match.homeTeam.name;
+  const awayTeamLabel = match.awayTeam.shortName || match.awayTeam.name;
+
+  function openLineup(side: "home" | "away") {
+    setLineupSide(side);
+    setShowLineupModal(true);
+  }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-6">
-              <div className="text-center">
-                <div className="text-sm text-muted-foreground">
-                  {match.homeTeam.shortName || match.homeTeam.name}
+    <div className="space-y-4">
+      {shouldShowSetup ? (
+        <RosterSetup matchId={matchId} onConfirmed={fetchMatch} />
+      ) : (
+        <>
+          <Card>
+            <CardHeader className="py-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-4">
+                  <div className="text-center min-w-[90px]">
+                    <div className="text-xs text-muted-foreground font-medium uppercase tracking-wide">
+                      {match.homeTeam.shortName || match.homeTeam.name}
+                    </div>
+                    <div className="text-4xl font-bold">{homeGoals}</div>
+                  </div>
+                  <div className="text-2xl text-muted-foreground font-light">—</div>
+                  <div className="text-center min-w-[90px]">
+                    <div className="text-xs text-muted-foreground font-medium uppercase tracking-wide">
+                      {match.awayTeam.shortName || match.awayTeam.name}
+                    </div>
+                    <div className="text-4xl font-bold">{awayGoals}</div>
+                  </div>
+                  <span
+                    className={`ml-2 px-2 py-1 rounded-full text-xs font-medium ${
+                      match.status === "LIVE"
+                        ? "bg-green-100 text-green-800"
+                        : match.status === "HALFTIME"
+                          ? "bg-yellow-100 text-yellow-800"
+                          : match.status === "FINISHED"
+                            ? "bg-blue-100 text-blue-800"
+                            : "bg-gray-100 text-gray-600"
+                    }`}
+                  >
+                    {{
+                      SETUP: "Configuración",
+                      LIVE: "En Vivo",
+                      HALFTIME: "Entretiempo",
+                      FINISHED: "Finalizado",
+                    }[match.status]}
+                  </span>
                 </div>
-                <div className="text-4xl font-bold">{homeGoals}</div>
-              </div>
-              <div className="text-2xl text-muted-foreground">-</div>
-              <div className="text-center">
-                <div className="text-sm text-muted-foreground">
-                  {match.awayTeam.shortName || match.awayTeam.name}
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setShowHotkeys(!showHotkeys)}>
+                    <Keyboard className="mr-2 h-4 w-4" />
+                    Atajos
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleExport}>
+                    <Download className="mr-2 h-4 w-4" />
+                    Exportar
+                  </Button>
                 </div>
-                <div className="text-4xl font-bold">{awayGoals}</div>
               </div>
-            </div>
-            <div className="flex gap-2">
-              <Button variant="outline" onClick={() => setShowHotkeys(!showHotkeys)}>
-                <Keyboard className="mr-2 h-4 w-4" />
-                Atajos
-              </Button>
-              <Button variant="outline" onClick={handleExport}>
-                <Download className="mr-2 h-4 w-4" />
-                Exportar
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-      </Card>
+            </CardHeader>
+          </Card>
 
-      {/* Hotkeys Card */}
-      {showHotkeys && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Atajos de Teclado</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              <div className="text-center">
-                <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">
-                  G
-                </kbd>
-                <p className="text-xs mt-1">Gol</p>
-              </div>
-              <div className="text-center">
-                <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">
-                  F
-                </kbd>
-                <p className="text-xs mt-1">Falta</p>
-              </div>
-              <div className="text-center">
-                <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">
-                  A
-                </kbd>
-                <p className="text-xs mt-1">Atajada</p>
-              </div>
-              <div className="text-center">
-                <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">
-                  Y
-                </kbd>
-                <p className="text-xs mt-1">T. Amarilla</p>
-              </div>
-              <div className="text-center">
-                <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">
-                  R
-                </kbd>
-                <p className="text-xs mt-1">T. Roja</p>
-              </div>
-              <div className="text-center">
-                <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">
-                  S
-                </kbd>
-                <p className="text-xs mt-1">Disparo</p>
-              </div>
-              <div className="text-center">
-                <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">
-                  K
-                </kbd>
-                <p className="text-xs mt-1">Corner</p>
-              </div>
-              <div className="text-center">
-                <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">
-                  O
-                </kbd>
-                <p className="text-xs mt-1">Offside</p>
-              </div>
-              <div className="text-center">
-                <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">
-                  C
-                </kbd>
-                <p className="text-xs mt-1">Cambio</p>
-              </div>
-              <div className="text-center">
-                <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">
-                  ESC
-                </kbd>
-                <p className="text-xs mt-1">Deseleccionar</p>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground mt-4">
-              Selecciona un jugador en la cancha y presiona una tecla para registrar un evento.
-            </p>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Main Content */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left: Field + Timer */}
-        <div className="lg:col-span-2 space-y-6">
-          <FieldCanvas matchId={matchId} />
-          {selectedPlayerId && (
-            <Card className="bg-yellow-50 border-yellow-200">
+          {showHotkeys && (
+            <Card>
               <CardContent className="py-3">
-                <p className="text-sm text-center">
-                  ⚽ Jugador seleccionado - Presiona una tecla para registrar evento
-                </p>
+                <div className="flex flex-wrap gap-3 justify-center">
+                  {Object.entries(HOTKEY_MAPPINGS).map(([key, label]) => (
+                    <div key={key} className="text-center">
+                      <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded uppercase">{key}</kbd>
+                      <p className="text-xs mt-1 text-muted-foreground">{label}</p>
+                    </div>
+                  ))}
+                  <div className="text-center">
+                    <kbd className="px-2 py-1 text-xs font-semibold bg-gray-100 border rounded">ESC</kbd>
+                    <p className="text-xs mt-1 text-muted-foreground">Deselec.</p>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           )}
-        </div>
 
-        {/* Right: Timer + Timeline */}
-        <div className="space-y-6">
-          <TimerComponent matchId={matchId} />
-          <EventTimeline matchId={matchId} />
-        </div>
-      </div>
+          <div className="grid grid-cols-1 md:grid-cols-[0.98fr_1.02fr] xl:grid-cols-[0.95fr_1.05fr] gap-4 items-start">
+            <div className="min-w-0 overflow-hidden">
+              <FieldCanvas matchId={matchId} readOnly={isReadOnly} />
+                <Card>
+                <CardContent className="py-4 space-y-3">
+                  <div className="rounded-lg border p-3 bg-white">
+                    <p className="text-sm font-semibold mb-2">Panel de eventos</p>
+                    <p className="text-xs text-muted-foreground mb-3">
+                      {isReadOnly
+                        ? "Partido finalizado: solo lectura."
+                        : isLive
+                        ? "Selecciona un jugador y registra eventos al instante."
+                        : "Partido no iniciado o finalizado. Los botones están en modo lectura."}
+                    </p>
+                    <EventButtons onEvent={triggerEvent} disabled={!isLive || isReadOnly} />
+                  </div>
+
+                  <div className="rounded-lg border p-2 bg-white">
+                    <p className="text-xs font-semibold text-muted-foreground mb-2">Alineaciones (compacto)</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button variant="outline" className="justify-start" onClick={() => openLineup("home")}>
+                        {homeTeamLabel}
+                      </Button>
+                      <Button variant="outline" className="justify-start" onClick={() => openLineup("away")}>
+                        {awayTeamLabel}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {selectedName ? (
+                    <p className="text-xs text-yellow-700 font-medium bg-yellow-50 rounded px-2 py-1.5 w-fit">
+                      ✔ Seleccionado: {selectedName}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Selecciona un jugador para registrar sin popup.
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="space-y-4">
+              <TimerComponent matchId={matchId} readOnly={isReadOnly} />
+              <EventTimeline matchId={matchId} readOnly={isReadOnly} />
+
+            
+            </div>
+          </div>
+        </>
+      )}
+
+      {pendingEventType && (
+        <EventDialog
+          matchId={matchId}
+          eventType={pendingEventType}
+          onClose={() => setPendingEventType(null)}
+        />
+      )}
+
+      {showLineupModal && (
+        <Modal title="Alineaciones del partido" onClose={() => setShowLineupModal(false)} maxWidth="lg">
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                variant={lineupSide === "home" ? "default" : "outline"}
+                onClick={() => setLineupSide("home")}
+                className="justify-start"
+              >
+                {homeTeamLabel}
+              </Button>
+              <Button
+                variant={lineupSide === "away" ? "default" : "outline"}
+                onClick={() => setLineupSide("away")}
+                className="justify-start"
+              >
+                {awayTeamLabel}
+              </Button>
+            </div>
+            <div className="rounded-lg border p-2">
+              <PlayerPanel side={lineupSide} />
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

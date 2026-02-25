@@ -57,6 +57,7 @@ model Season {
 
   competition    Competition    @relation(fields: [competitionId], references: [id], onDelete: Cascade)
   teams          TeamSeason[]
+  standings      SeasonStanding[]
   fixtureMatches FixtureMatch[]
 }
 
@@ -70,8 +71,39 @@ model Team {
   updatedAt DateTime @updatedAt
 
   seasons     TeamSeason[]
+  standings   SeasonStanding[]
   homeMatches MatchSession[] @relation("HomeTeam")
   awayMatches MatchSession[] @relation("AwayTeam")
+  fixtureHomeMatches FixtureMatch[] @relation("FixtureHomeTeam")
+  fixtureAwayMatches FixtureMatch[] @relation("FixtureAwayTeam")
+  matchRosterPlayers MatchRosterPlayer[]
+}
+
+model SeasonStanding {
+  id           String   @id @default(cuid())
+  seasonId     String
+  teamId       String
+  groupName    String   @default("")
+  rank         Int
+  points       Int
+  played       Int
+  won          Int
+  draw         Int
+  lost         Int
+  goalsFor     Int
+  goalsAgainst Int
+  goalsDiff    Int
+  form         String?
+  status       String?
+  description  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  season Season @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([seasonId, teamId, groupName])
+  @@index([seasonId, rank])
 }
 
 model TeamSeason {
@@ -97,7 +129,8 @@ model Player {
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
 
-  seasons PlayerSeason[]
+  seasons      PlayerSeason[]
+  matchRosters MatchRosterPlayer[]
 }
 
 enum PlayerPosition {
@@ -125,16 +158,25 @@ model PlayerSeason {
 
 model FixtureMatch {
   id         String   @id @default(cuid())
+  externalId Int?     @unique
   seasonId   String
   homeTeamId String
   awayTeamId String
   matchDate  DateTime
   venue      String?
   round      Int?
+  roundLabel String?
+  statusShort String?
+  statusLong  String?
+  homeScore   Int?
+  awayScore   Int?
+  isFinished  Boolean @default(false)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   season        Season         @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  homeTeam      Team           @relation("FixtureHomeTeam", fields: [homeTeamId], references: [id], onDelete: Restrict)
+  awayTeam      Team           @relation("FixtureAwayTeam", fields: [awayTeamId], references: [id], onDelete: Restrict)
   matchSessions MatchSession[]
 }
 
@@ -156,6 +198,7 @@ model MatchSession {
   currentPeriod       MatchPeriod @default(FIRST_HALF)
   elapsedSeconds      Int         @default(0)
   isTimerRunning      Boolean     @default(false)
+  timerStartedAt      DateTime?
   firstHalfAddedTime  Int?
   secondHalfAddedTime Int?
 
@@ -199,6 +242,9 @@ model MatchRosterPlayer {
   isStarter    Boolean         @default(true)
   position     PlayerPosition?
 
+  // Custom display name (narrator can override catalog name)
+  customName String?
+
   // Layout position (x, y en % de 0-100)
   layoutX Float?
   layoutY Float?
@@ -207,9 +253,25 @@ model MatchRosterPlayer {
   updatedAt DateTime @updatedAt
 
   match  MatchSession @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  player Player       @relation(fields: [playerId], references: [id])
+  team   Team         @relation(fields: [teamId], references: [id], onDelete: Restrict)
   events MatchEvent[]
 
   @@unique([matchId, playerId])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorUserId String?
+  action     String
+  entityType String
+  entityId   String?
+  payload    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([action, createdAt])
+  @@index([actorUserId, createdAt])
 }
 
 // ============================================

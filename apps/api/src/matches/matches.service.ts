@@ -14,6 +14,126 @@ import { MatchStatus, MatchPeriod } from '@prisma/client';
 export class MatchesService {
   constructor(private prisma: PrismaService) {}
 
+  private computeEffectiveElapsed(match: {
+    elapsedSeconds: number;
+    isTimerRunning: boolean;
+    timerStartedAt?: Date | null;
+  }) {
+    if (!match.isTimerRunning || !match.timerStartedAt) return match.elapsedSeconds;
+    const deltaSeconds = Math.max(
+      0,
+      Math.floor((Date.now() - new Date(match.timerStartedAt).getTime()) / 1000),
+    );
+    return match.elapsedSeconds + deltaSeconds;
+  }
+
+  private parseSeasonYears(name: string): { startYear: number; endYear: number } | null {
+    const trimmed = (name || '').trim();
+    const single = trimmed.match(/^(\d{4})$/);
+    if (single) {
+      const year = Number(single[1]);
+      return { startYear: year, endYear: year };
+    }
+
+    const range = trimmed.match(/^(\d{4})\s*[-/]\s*(\d{2}|\d{4})$/);
+    if (!range) return null;
+
+    const startYear = Number(range[1]);
+    const rawEnd = range[2];
+    const endYear =
+      rawEnd.length === 2
+        ? Math.floor(startYear / 100) * 100 + Number(rawEnd)
+        : Number(rawEnd);
+
+    return { startYear, endYear };
+  }
+
+  private resolveSeasonStatus(
+    season: { name: string; startDate?: Date | null; endDate?: Date | null },
+    now = new Date(),
+  ): 'CURRENT' | 'HISTORICAL' | 'UPCOMING' {
+    if (season.startDate && season.endDate) {
+      if (now >= season.startDate && now <= season.endDate) return 'CURRENT';
+      return now > season.endDate ? 'HISTORICAL' : 'UPCOMING';
+    }
+
+    const years = this.parseSeasonYears(season.name);
+    if (years) {
+      const currentYear = now.getUTCFullYear();
+      if (currentYear >= years.startYear && currentYear <= years.endYear) return 'CURRENT';
+      return currentYear > years.endYear ? 'HISTORICAL' : 'UPCOMING';
+    }
+
+    return 'HISTORICAL';
+  }
+
+  private async findCurrentSeasonsForTeams(homeTeamId: string, awayTeamId: string) {
+    const seasons = await this.prisma.season.findMany({
+      where: {
+        AND: [
+          { teams: { some: { teamId: homeTeamId } } },
+          { teams: { some: { teamId: awayTeamId } } },
+        ],
+      },
+      include: {
+        competition: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    return seasons.filter((season) => this.resolveSeasonStatus(season) === 'CURRENT');
+  }
+
+  private async getCurrentSeasonIds() {
+    const seasons = await this.prisma.season.findMany({
+      select: {
+        id: true,
+        name: true,
+        startDate: true,
+        endDate: true,
+      },
+    });
+    return seasons
+      .filter((season) => this.resolveSeasonStatus(season) === 'CURRENT')
+      .map((season) => season.id);
+  }
+
+  private async resolveMatchCurrentSeason(match: {
+    fixtureMatchId?: string | null;
+    homeTeamId: string;
+    awayTeamId: string;
+  }) {
+    if (match.fixtureMatchId) {
+      const fixture = await this.prisma.fixtureMatch.findUnique({
+        where: { id: match.fixtureMatchId },
+        include: { season: { include: { competition: true } } },
+      });
+      if (!fixture) {
+        throw new NotFoundException(`Fixture with ID ${match.fixtureMatchId} not found`);
+      }
+      const seasonStatus = this.resolveSeasonStatus(fixture.season);
+      if (seasonStatus !== 'CURRENT') {
+        throw new BadRequestException(
+          `Cannot use squad from ${seasonStatus.toLowerCase()} season "${fixture.season.name}"`,
+        );
+      }
+      return fixture.season;
+    }
+
+    const currentSeasons = await this.findCurrentSeasonsForTeams(
+      match.homeTeamId,
+      match.awayTeamId,
+    );
+    if (currentSeasons.length === 0) {
+      throw new BadRequestException(
+        'Both teams must be assigned to the same CURRENT season',
+      );
+    }
+    return currentSeasons[0];
+  }
+
   async create(narratorId: string, createMatchDto: CreateMatchDto) {
     // Validate teams exist
     const [homeTeam, awayTeam] = await Promise.all([
@@ -31,6 +151,52 @@ export class MatchesService {
 
     if (createMatchDto.homeTeamId === createMatchDto.awayTeamId) {
       throw new BadRequestException('Home and away teams must be different');
+    }
+
+    if (createMatchDto.fixtureMatchId) {
+      const fixture = await this.prisma.fixtureMatch.findUnique({
+        where: { id: createMatchDto.fixtureMatchId },
+        include: {
+          season: true,
+        },
+      });
+
+      if (!fixture) {
+        throw new NotFoundException(`Fixture with ID ${createMatchDto.fixtureMatchId} not found`);
+      }
+
+      if (
+        fixture.homeTeamId !== createMatchDto.homeTeamId ||
+        fixture.awayTeamId !== createMatchDto.awayTeamId
+      ) {
+        throw new BadRequestException(
+          'homeTeamId/awayTeamId must match the selected fixture',
+        );
+      }
+
+      const seasonStatus = this.resolveSeasonStatus(fixture.season);
+      if (seasonStatus !== 'CURRENT') {
+        throw new BadRequestException(
+          `Cannot create live match from ${seasonStatus.toLowerCase()} season "${fixture.season.name}"`,
+        );
+      }
+
+      if (fixture.statusShort === 'DIS') {
+        throw new BadRequestException(
+          'Este partido está deshabilitado por admin para esta fecha',
+        );
+      }
+    } else {
+      const currentSeasons = await this.findCurrentSeasonsForTeams(
+        createMatchDto.homeTeamId,
+        createMatchDto.awayTeamId,
+      );
+
+      if (currentSeasons.length === 0) {
+        throw new BadRequestException(
+          'Both teams must be assigned to the same CURRENT season to create a match without fixture',
+        );
+      }
     }
 
     return this.prisma.matchSession.create({
@@ -56,11 +222,53 @@ export class MatchesService {
     });
   }
 
-  async findAll(narratorId: string, status?: MatchStatus) {
+  async findAll(
+    narratorId: string,
+    status?: MatchStatus,
+    userRole?: string,
+    includeAll = false,
+  ) {
+    const currentSeasonIds = await this.getCurrentSeasonIds();
+    if (currentSeasonIds.length === 0) {
+      return [];
+    }
+
+    const canSeeAll = includeAll && userRole === 'SUPERADMIN';
+
     return this.prisma.matchSession.findMany({
       where: {
-        narratorId,
+        ...(canSeeAll ? {} : { narratorId }),
         ...(status && { status }),
+        OR: [
+          {
+            fixtureMatch: {
+              seasonId: {
+                in: currentSeasonIds,
+              },
+            },
+          },
+          {
+            fixtureMatchId: null,
+            homeTeam: {
+              seasons: {
+                some: {
+                  seasonId: {
+                    in: currentSeasonIds,
+                  },
+                },
+              },
+            },
+            awayTeam: {
+              seasons: {
+                some: {
+                  seasonId: {
+                    in: currentSeasonIds,
+                  },
+                },
+              },
+            },
+          },
+        ],
       },
       include: {
         homeTeam: true,
@@ -82,6 +290,82 @@ export class MatchesService {
     });
   }
 
+  async getSquadOptions(id: string, userId: string, userRole: string) {
+    const match = await this.findOne(id, userId, userRole);
+    const season = await this.resolveMatchCurrentSeason({
+      fixtureMatchId: match.fixtureMatchId,
+      homeTeamId: match.homeTeamId,
+      awayTeamId: match.awayTeamId,
+    });
+
+    const [homeTeamSeason, awayTeamSeason] = await Promise.all([
+      this.prisma.teamSeason.findFirst({
+        where: {
+          seasonId: season.id,
+          teamId: match.homeTeamId,
+        },
+        include: {
+          players: {
+            include: { player: true },
+            orderBy: [
+              { jerseyNumber: 'asc' },
+              { player: { lastName: 'asc' } },
+            ],
+          },
+        },
+      }),
+      this.prisma.teamSeason.findFirst({
+        where: {
+          seasonId: season.id,
+          teamId: match.awayTeamId,
+        },
+        include: {
+          players: {
+            include: { player: true },
+            orderBy: [
+              { jerseyNumber: 'asc' },
+              { player: { lastName: 'asc' } },
+            ],
+          },
+        },
+      }),
+    ]);
+
+    if (!homeTeamSeason || !awayTeamSeason) {
+      throw new BadRequestException('Teams are not fully assigned to current season squads');
+    }
+
+    return {
+      season: {
+        id: season.id,
+        name: season.name,
+        competition: season.competition,
+      },
+      homeTeam: {
+        id: match.homeTeam.id,
+        name: match.homeTeam.name,
+        squad: homeTeamSeason.players.map((entry) => ({
+          playerId: entry.playerId,
+          firstName: entry.player.firstName,
+          lastName: entry.player.lastName,
+          position: entry.player.position,
+          defaultJersey: entry.jerseyNumber ?? 0,
+        })),
+      },
+      awayTeam: {
+        id: match.awayTeam.id,
+        name: match.awayTeam.name,
+        squad: awayTeamSeason.players.map((entry) => ({
+          playerId: entry.playerId,
+          firstName: entry.player.firstName,
+          lastName: entry.player.lastName,
+          position: entry.player.position,
+          defaultJersey: entry.jerseyNumber ?? 0,
+        })),
+      },
+    };
+  }
+
   async findOne(id: string, userId: string, userRole: string) {
     const match = await this.prisma.matchSession.findUnique({
       where: { id },
@@ -98,28 +382,28 @@ export class MatchesService {
         awayTeam: true,
         roster: {
           include: {
+            player: {
+              select: { id: true, firstName: true, lastName: true, position: true },
+            },
             events: {
-              where: {
-                isDeleted: false,
+              where: { isDeleted: false },
+            },
+          },
+          orderBy: [{ isHomeTeam: 'desc' }, { jerseyNumber: 'asc' }],
+        },
+        events: {
+          where: { isDeleted: false },
+          include: {
+            rosterPlayer: {
+              select: {
+                id: true,
+                jerseyNumber: true,
+                isHomeTeam: true,
+                player: { select: { id: true, firstName: true, lastName: true } },
               },
             },
           },
-          orderBy: {
-            isHomeTeam: 'desc',
-          },
-        },
-        events: {
-          where: {
-            isDeleted: false,
-          },
-          orderBy: [
-            {
-              minute: 'asc',
-            },
-            {
-              second: 'asc',
-            },
-          ],
+          orderBy: [{ minute: 'asc' }, { second: 'asc' }],
         },
       },
     });
@@ -133,7 +417,10 @@ export class MatchesService {
       throw new ForbiddenException('You do not have access to this match');
     }
 
-    return match;
+    return {
+      ...match,
+      elapsedSeconds: this.computeEffectiveElapsed(match),
+    };
   }
 
   async update(id: string, userId: string, userRole: string, updateMatchDto: UpdateMatchDto) {
@@ -190,25 +477,21 @@ export class MatchesService {
       throw new BadRequestException('Timer is already running');
     }
 
-    if (match.status === MatchStatus.SETUP) {
-      // First start → move to LIVE
-      await this.prisma.matchSession.update({
-        where: { id },
-        data: {
-          status: MatchStatus.LIVE,
-          isTimerRunning: true,
-          updatedAt: new Date(),
-        },
-      });
-    } else {
-      await this.prisma.matchSession.update({
-        where: { id },
-        data: {
-          isTimerRunning: true,
-          updatedAt: new Date(),
-        },
-      });
-    }
+    const currentElapsed = match.elapsedSeconds;
+    const nextStatus =
+      match.status === MatchStatus.SETUP || match.status === MatchStatus.HALFTIME
+        ? MatchStatus.LIVE
+        : match.status;
+
+    await this.prisma.matchSession.update({
+      where: { id },
+      data: {
+        status: nextStatus,
+        elapsedSeconds: currentElapsed,
+        isTimerRunning: true,
+        timerStartedAt: new Date(),
+      },
+    });
 
     return { message: 'Timer started' };
   }
@@ -220,11 +503,14 @@ export class MatchesService {
       throw new BadRequestException('Timer is not running');
     }
 
+    const currentElapsed = match.elapsedSeconds;
+
     await this.prisma.matchSession.update({
       where: { id },
       data: {
+        elapsedSeconds: currentElapsed,
         isTimerRunning: false,
-        updatedAt: new Date(),
+        timerStartedAt: null,
       },
     });
 
@@ -232,29 +518,61 @@ export class MatchesService {
   }
 
   async updateElapsedTime(id: string, userId: string, userRole: string, seconds: number) {
-    await this.findOne(id, userId, userRole);
+    const match = await this.findOne(id, userId, userRole);
 
     await this.prisma.matchSession.update({
       where: { id },
       data: {
         elapsedSeconds: seconds,
+        timerStartedAt: match.isTimerRunning ? new Date() : null,
       },
     });
 
     return { message: 'Elapsed time updated' };
   }
 
-  async endPeriod(id: string, userId: string, userRole: string) {
+  async endPeriod(id: string, userId: string, userRole: string, force = false) {
     const match = await this.findOne(id, userId, userRole);
+    const currentElapsed = match.elapsedSeconds;
 
-    let newStatus = match.status;
-    let newPeriod = match.currentPeriod;
+    if (match.status === MatchStatus.FINISHED) {
+      throw new BadRequestException('El partido ya está finalizado');
+    }
+
+    if (
+      match.currentPeriod !== MatchPeriod.FIRST_HALF &&
+      match.currentPeriod !== MatchPeriod.SECOND_HALF
+    ) {
+      throw new BadRequestException(
+        `No se puede finalizar el período actual (${match.currentPeriod}) con esta acción`,
+      );
+    }
+
+    const addedMinutes =
+      match.currentPeriod === MatchPeriod.FIRST_HALF
+        ? match.firstHalfAddedTime ?? 0
+        : match.secondHalfAddedTime ?? 0;
+    const requiredSeconds = 45 * 60 + addedMinutes * 60;
+
+    if (currentElapsed < requiredSeconds && !force) {
+      const missingSeconds = requiredSeconds - currentElapsed;
+      const missingMinutes = Math.ceil(missingSeconds / 60);
+      throw new BadRequestException(
+        `Aún no se completaron los 45' del período (${missingMinutes} min restantes). Usa force=true para finalizar igualmente.`,
+      );
+    }
+
+    let newStatus: MatchStatus = match.status as MatchStatus;
+    let newPeriod: MatchPeriod = match.currentPeriod as MatchPeriod;
+    let newElapsed = currentElapsed;
 
     if (match.currentPeriod === MatchPeriod.FIRST_HALF) {
       newStatus = MatchStatus.HALFTIME;
       newPeriod = MatchPeriod.SECOND_HALF;
+      newElapsed = 0;
     } else if (match.currentPeriod === MatchPeriod.SECOND_HALF) {
       newStatus = MatchStatus.FINISHED;
+      newElapsed = match.elapsedSeconds;
     }
 
     await this.prisma.matchSession.update({
@@ -262,12 +580,18 @@ export class MatchesService {
       data: {
         status: newStatus,
         currentPeriod: newPeriod,
+        elapsedSeconds: newElapsed,
         isTimerRunning: false,
-        updatedAt: new Date(),
+        timerStartedAt: null,
       },
     });
 
-    return { message: 'Period ended', status: newStatus, period: newPeriod };
+    return {
+      message: 'Period ended',
+      status: newStatus,
+      period: newPeriod,
+      forced: force,
+    };
   }
 
   async updateAddedTime(

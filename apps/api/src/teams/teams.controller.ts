@@ -15,6 +15,7 @@ import { AssignToSeasonDto } from './dto/assign-to-season.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { UserRole } from '@prisma/client';
 
 @Controller('teams')
@@ -25,8 +26,8 @@ export class TeamsController {
   @Post()
   @UseGuards(RolesGuard)
   @Roles(UserRole.SUPERADMIN)
-  create(@Body() createTeamDto: CreateTeamDto) {
-    return this.teamsService.create(createTeamDto);
+  create(@CurrentUser() user: any, @Body() createTeamDto: CreateTeamDto) {
+    return this.teamsService.create(createTeamDto, user?.id);
   }
 
   @Get()
@@ -42,21 +43,21 @@ export class TeamsController {
   @Patch(':id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.SUPERADMIN)
-  update(@Param('id') id: string, @Body() updateTeamDto: UpdateTeamDto) {
-    return this.teamsService.update(id, updateTeamDto);
+  update(@CurrentUser() user: any, @Param('id') id: string, @Body() updateTeamDto: UpdateTeamDto) {
+    return this.teamsService.update(id, updateTeamDto, user?.id);
   }
 
   @Delete(':id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.SUPERADMIN)
-  remove(@Param('id') id: string) {
-    return this.teamsService.remove(id);
+  remove(@CurrentUser() user: any, @Param('id') id: string) {
+    return this.teamsService.remove(id, user?.id);
   }
 
   @Post(':id/assign-season')
   @UseGuards(RolesGuard)
   @Roles(UserRole.SUPERADMIN)
-  assignToSeason(@Param('id') id: string, @Body() assignToSeasonDto: AssignToSeasonDto) {
-    return this.teamsService.assignToSeason(id, assignToSeasonDto);
+  assignToSeason(@CurrentUser() user: any, @Param('id') id: string, @Body() assignToSeasonDto: AssignToSeasonDto) {
+    return this.teamsService.assignToSeason(id, assignToSeasonDto, user?.id);
   }
 }

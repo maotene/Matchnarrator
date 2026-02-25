@@ -56,12 +56,13 @@ async function main() {
   console.log('✅ Created competition');
 
   // Create season
+  const currentYear = new Date().getFullYear();
   const season = await prisma.season.create({
     data: {
-      name: '2024',
+      name: String(currentYear),
       competitionId: competition.id,
-      startDate: new Date('2024-01-15'),
-      endDate: new Date('2024-12-15'),
+      startDate: new Date(`${currentYear}-01-15`),
+      endDate: new Date(`${currentYear}-12-15`),
     },
   });
 

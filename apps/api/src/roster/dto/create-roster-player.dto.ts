@@ -18,6 +18,10 @@ export class CreateRosterPlayerDto {
   @IsNotEmpty()
   isHomeTeam: boolean;
 
+  @IsString()
+  @IsOptional()
+  customName?: string;
+
   @IsBoolean()
   @IsOptional()
   isStarter?: boolean;

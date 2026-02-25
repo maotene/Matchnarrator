@@ -12,6 +12,82 @@ import { UpdateRosterPlayerDto } from './dto/update-roster-player.dto';
 export class RosterService {
   constructor(private prisma: PrismaService) {}
 
+  private parseSeasonYears(name: string): { startYear: number; endYear: number } | null {
+    const trimmed = (name || '').trim();
+    const single = trimmed.match(/^(\d{4})$/);
+    if (single) {
+      const year = Number(single[1]);
+      return { startYear: year, endYear: year };
+    }
+
+    const range = trimmed.match(/^(\d{4})\s*[-/]\s*(\d{2}|\d{4})$/);
+    if (!range) return null;
+
+    const startYear = Number(range[1]);
+    const rawEnd = range[2];
+    const endYear =
+      rawEnd.length === 2
+        ? Math.floor(startYear / 100) * 100 + Number(rawEnd)
+        : Number(rawEnd);
+
+    return { startYear, endYear };
+  }
+
+  private resolveSeasonStatus(
+    season: { name: string; startDate?: Date | null; endDate?: Date | null },
+    now = new Date(),
+  ): 'CURRENT' | 'HISTORICAL' | 'UPCOMING' {
+    if (season.startDate && season.endDate) {
+      if (now >= season.startDate && now <= season.endDate) return 'CURRENT';
+      return now > season.endDate ? 'HISTORICAL' : 'UPCOMING';
+    }
+
+    const years = this.parseSeasonYears(season.name);
+    if (years) {
+      const currentYear = now.getUTCFullYear();
+      if (currentYear >= years.startYear && currentYear <= years.endYear) return 'CURRENT';
+      return currentYear > years.endYear ? 'HISTORICAL' : 'UPCOMING';
+    }
+
+    return 'HISTORICAL';
+  }
+
+  private async resolveMatchCurrentSeasonId(match: { id: string; homeTeamId: string; awayTeamId: string; fixtureMatchId?: string | null }) {
+    if (match.fixtureMatchId) {
+      const fixture = await this.prisma.fixtureMatch.findUnique({
+        where: { id: match.fixtureMatchId },
+        include: { season: true },
+      });
+      if (!fixture) {
+        throw new NotFoundException(`Fixture with ID ${match.fixtureMatchId} not found`);
+      }
+      if (this.resolveSeasonStatus(fixture.season) !== 'CURRENT') {
+        throw new BadRequestException(
+          `Cannot edit roster from non-current season "${fixture.season.name}"`,
+        );
+      }
+      return fixture.seasonId;
+    }
+
+    const seasons = await this.prisma.season.findMany({
+      where: {
+        AND: [
+          { teams: { some: { teamId: match.homeTeamId } } },
+          { teams: { some: { teamId: match.awayTeamId } } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const current = seasons.find((season) => this.resolveSeasonStatus(season) === 'CURRENT');
+    if (!current) {
+      throw new BadRequestException(
+        'Match teams are not in the same CURRENT season; roster can only use current-season squads',
+      );
+    }
+    return current.id;
+  }
+
   async create(matchId: string, createRosterPlayerDto: CreateRosterPlayerDto) {
     // Verify match exists
     const match = await this.prisma.matchSession.findUnique({
@@ -52,6 +128,24 @@ export class RosterService {
       );
     }
 
+    const seasonId = await this.resolveMatchCurrentSeasonId(match);
+    const playerInSeasonSquad = await this.prisma.playerSeason.findFirst({
+      where: {
+        playerId: createRosterPlayerDto.playerId,
+        teamSeason: {
+          seasonId,
+          teamId: createRosterPlayerDto.teamId,
+        },
+      },
+      select: { id: true },
+    });
+
+    if (!playerInSeasonSquad) {
+      throw new BadRequestException(
+        'Player is not part of this team current-season squad',
+      );
+    }
+
     // Check if player already in roster
     const existing = await this.prisma.matchRosterPlayer.findUnique({
       where: {
@@ -73,8 +167,12 @@ export class RosterService {
         teamId: createRosterPlayerDto.teamId,
         jerseyNumber: createRosterPlayerDto.jerseyNumber,
         isHomeTeam: createRosterPlayerDto.isHomeTeam,
+        customName: createRosterPlayerDto.customName,
         isStarter: createRosterPlayerDto.isStarter ?? true,
         position: createRosterPlayerDto.position,
+      },
+      include: {
+        player: { select: { id: true, firstName: true, lastName: true, position: true } },
       },
     });
   }

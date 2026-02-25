@@ -28,8 +28,18 @@ export class MatchesController {
   }
 
   @Get()
-  findAll(@CurrentUser() user: any, @Query('status') status?: MatchStatus) {
-    return this.matchesService.findAll(user.id, status);
+  findAll(
+    @CurrentUser() user: any,
+    @Query('status') status?: MatchStatus,
+    @Query('all') all?: string,
+  ) {
+    const includeAll = all === '1' || all === 'true';
+    return this.matchesService.findAll(user.id, status, user.role, includeAll);
+  }
+
+  @Get(':id/squad-options')
+  getSquadOptions(@CurrentUser() user: any, @Param('id') id: string) {
+    return this.matchesService.getSquadOptions(id, user.id, user.role);
   }
 
   @Get(':id')
@@ -63,8 +73,12 @@ export class MatchesController {
   }
 
   @Post(':id/timer/end-period')
-  endPeriod(@CurrentUser() user: any, @Param('id') id: string) {
-    return this.matchesService.endPeriod(id, user.id, user.role);
+  endPeriod(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body() body: { force?: boolean },
+  ) {
+    return this.matchesService.endPeriod(id, user.id, user.role, Boolean(body?.force));
   }
 
   @Patch(':id/timer/added-time')
